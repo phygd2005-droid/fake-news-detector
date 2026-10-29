@@ -1,4 +1,3 @@
-import hmac
 import io
 import os
 import re
@@ -22,31 +21,6 @@ def secret(name, default=""):
         return st.secrets[name]
     except Exception:
         return os.environ.get(name, default)
-
-
-def login_gate():
-    """Asks for a username and password when APP_USERNAME / APP_PASSWORD are set in secrets."""
-    user_ok = str(secret("APP_USERNAME", ""))
-    pass_ok = str(secret("APP_PASSWORD", ""))
-    if not user_ok or not pass_ok:
-        return                                  # no login configured (local testing)
-    if st.session_state.get("logged_in"):
-        with st.sidebar:
-            if st.button("Log out"):
-                st.session_state["logged_in"] = False
-                st.rerun()
-        return
-    st.title("🔒 Login")
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if (hmac.compare_digest(u.encode(), user_ok.encode())
-                and hmac.compare_digest(p.encode(), pass_ok.encode())):
-            st.session_state["logged_in"] = True
-            st.rerun()
-        else:
-            st.error("Wrong username or password")
-    st.stop()
 
 
 # ------------------------------------------------------------------ models
@@ -185,8 +159,6 @@ def run_check(text, use_web, google_key, topic):
 
 
 # ------------------------------------------------------------------ UI
-login_gate()
-
 st.title("🕵️ Fake News & Image Detector")
 
 with st.sidebar:
