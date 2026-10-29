@@ -7,6 +7,9 @@ Steps for every claim:
  3. NLI model compares each snippet with the claim (supports / contradicts)
  4. Fact-check sites and trusted news sites get a higher weight
  5. Scores are added up -> final verdict
+
+NEW: "X died" claims have their own check. A snippet only counts as support when
+it says that X himself/herself died - not when X is merely mourning someone else.
 """
 import re
 import time
@@ -55,6 +58,74 @@ down off only own same too s t don now said says say""".split())
 
 MIN_RELEVANCE = 0.5       # snippet must share about 3 key words with the claim
 MIN_TOTAL_EVIDENCE = 0.7  # below this we say UNCERTAIN
+
+
+# ---------------------------------------------------------------- death-claim helpers
+# Words in a claim that are not part of a person's name
+NAME_NOISE = {
+    "breaking", "news", "shocking", "sad", "rip", "today", "actor", "actress", "cricketer",
+    "legend", "legendary", "star", "former", "captain", "sir", "ji", "mr", "dr", "mrs", "ms",
+    "superstar", "singer", "politician", "leader", "famous", "big", "indian", "india",
+    "reported", "reports", "report", "confirmed", "finally", "really", "just", "yesterday",
+    "suddenly", "tonight", "confirm", "latest", "update",
+}
+
+CLAIM_DEATH_RE = re.compile(
+    r"\b(?:has\s+|is\s+|was\s+)?(?:died|dies|dead|passed\s+away|passes\s+away|passed\s+on)\b")
+
+DEATH_VERBS = (r"(?:dies|died|dead|passes\s+away|passed\s+away|passed\s+on|"
+               r"breathes\s+his\s+last|breathed\s+his\s+last|"
+               r"breathes\s+her\s+last|breathed\s+her\s+last|no\s+more)")
+
+# If these words sit between the name and the death word, the death belongs to someone else
+# (e.g. "Sachin Tendulkar's father dies", "Tendulkar mourns actor's death")
+RELATION_WORDS = {"father", "mother", "wife", "husband", "son", "daughter", "brother",
+                  "sister", "mom", "dad", "family", "friend", "mentor", "guru", "coach",
+                  "fan", "fans", "grandmother", "grandfather", "uncle", "aunt", "mourns",
+                  "mourn", "condoles", "condole", "pays", "paid", "reacts", "reacted",
+                  "tribute", "tributes", "shocked", "saddened", "after", "on", "over", "for"}
+
+
+def death_subject(claim):
+    """If the claim says that somebody died, return the name words of that person, else None."""
+    low = claim.lower()
+    m = re.search(r"\b(?:death|demise|passing)\s+of\s+([a-z .'-]+)", low)
+    if m:
+        words = re.findall(r"[a-z]+", m.group(1))
+        names = [w for w in words if w not in STOP and w not in NAME_NOISE and len(w) > 2]
+        return names[:3] or None
+    m = CLAIM_DEATH_RE.search(low)
+    if not m:
+        return None
+    before = re.findall(r"[a-z]+", low[:m.start()])
+    if len(before) > 8:                      # long sentence, not a simple "X died" claim
+        return None
+    names = [w for w in before if w not in STOP and w not in NAME_NOISE and len(w) > 2]
+    return names[-3:] or None
+
+
+def mentions_person(text, names):
+    low = text.lower()
+    return all(re.search(r"\b" + re.escape(n) + r"\b", low) for n in names)
+
+
+def reports_person_death(text, names):
+    """True only if the text says that THIS person died (not that he/she mourns someone else)."""
+    low = text.lower()
+    name_re = r"\W+".join(re.escape(n) for n in names)
+    # "Sachin Tendulkar dies / died / passes away"
+    pat1 = re.compile(r"\b" + name_re + r"\b(?P<gap>(?:\W+\w+){0,3}?)\W+" + DEATH_VERBS + r"\b")
+    for m in pat1.finditer(low):
+        gap = m.group("gap")
+        if "'s" in gap or "\u2019s" in gap:
+            continue
+        if any(w in RELATION_WORDS for w in re.findall(r"[a-z]+", gap)):
+            continue
+        return True
+    # "death / demise of Sachin Tendulkar"
+    pat2 = re.compile(r"\b(?:death|demise|passing|funeral|last\s+rites)\s+of\s+"
+                      r"(?:\w+\W+){0,2}?" + name_re + r"\b")
+    return bool(pat2.search(low))
 
 
 # ---------------------------------------------------------------- helpers
@@ -194,6 +265,7 @@ def verify_claim(claim, google_key=""):
     support = refute = 0.0
     evidence = []
     errors = []
+    person = death_subject(claim)          # None unless the claim says "X died"
 
     # 1) Google Fact Check API (optional)
     if google_key:
@@ -212,8 +284,11 @@ def verify_claim(claim, google_key=""):
 
     # 2) Web search
     query = make_query(claim)
+    queries = [query, query + " fact check"]
+    if person:
+        queries.append(" ".join(person) + " death hoax rumour")
     results, seen = [], set()
-    for i, q in enumerate((query, query + " fact check")):
+    for i, q in enumerate(queries):
         if i:
             time.sleep(1)                       # be gentle, avoids rate limits
         for r in web_search(q, errors=errors):
@@ -222,7 +297,8 @@ def verify_claim(claim, google_key=""):
                 results.append(r)
 
     debug = {"query": query, "search_results": len(results), "relevant_used": 0,
-             "support_score": 0.0, "refute_score": 0.0, "search_errors": errors[:3]}
+             "support_score": 0.0, "refute_score": 0.0, "search_errors": errors[:3],
+             "death_claim_about": " ".join(person) if person else None}
 
     if not results and not evidence:
         msg = "Web search returned no results."
@@ -235,11 +311,14 @@ def verify_claim(claim, google_key=""):
 
     # 3) Compare every snippet with the claim
     used = 0
+    no_report = 0                   # death claims: relevant pages that do NOT report the death
     for r in results:
         text = f"{r['title']}. {r['body']}"
         rel = relevance(claim, text)
         if rel < MIN_RELEVANCE:
             continue
+        if person and not mentions_person(text, person):
+            continue                # page is not about this person at all
         if used >= 15:
             break
         used += 1
@@ -264,6 +343,15 @@ def verify_claim(claim, google_key=""):
                 s, f, stance = 0.0, 1.5 * w * rel, "fact-check: false / fake"
             else:
                 s, f, stance = 0.0, 0.5 * w * rel, "fact-check (likely false)"
+        elif person:
+            # "X died" claim: only a page that says X died is support
+            if debunk:
+                s, f, stance = 0.0, w * rel, "denies / debunks"
+            elif reports_person_death(text, person):
+                s, f, stance = w * rel, 0.0, "reports the death"
+            else:
+                s, f, stance = 0.0, 0.0, "mentions the person, no death reported"
+                no_report += 1
         else:
             ent, con = nli(text, claim)
             s = w * ent * rel
@@ -286,10 +374,30 @@ def verify_claim(claim, google_key=""):
     debug["nli_model"] = nli_status()
     debug["support_score"] = round(support, 2)
     debug["refute_score"] = round(refute, 2)
-
-    # 4) Decide
-    total = support + refute
     evidence.sort(key=lambda e: -e["weight"])
+
+    # 4a) Decision for "X died" claims
+    if person:
+        name = " ".join(w.capitalize() for w in person)
+        debug["pages_without_death_report"] = no_report
+        if refute >= 1.5 and refute > support:
+            return {"claim": claim, "verdict": "FAKE", "confidence": 0.0, "evidence": evidence,
+                    "reason": f"Sources say the report about {name}'s death is false.",
+                    "debug": debug}
+        if support >= 3.0 and support > refute:
+            return {"claim": claim, "verdict": "TRUE", "confidence": 0.0, "evidence": evidence,
+                    "reason": f"Several sources report the death of {name}.", "debug": debug}
+        if support < 1.0 and no_report >= 2:
+            return {"claim": claim, "verdict": "FAKE", "confidence": 0.0, "evidence": evidence,
+                    "reason": f"No credible source reports that {name} died. The pages found "
+                              "only mention the name in other news (for example, reacting to "
+                              "someone else's death).", "debug": debug}
+        return {"claim": claim, "verdict": "UNCERTAIN", "confidence": 0.0, "evidence": evidence,
+                "reason": f"Not enough evidence either way about the death of {name}.",
+                "debug": debug}
+
+    # 4b) Decision for all other claims
+    total = support + refute
     if total < MIN_TOTAL_EVIDENCE:
         return {"claim": claim, "verdict": "UNCERTAIN", "confidence": 0.0, "evidence": evidence,
                 "reason": f"Found {len(results)} web results but only {used} were relevant - "
