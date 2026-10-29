@@ -13,7 +13,7 @@ from common import clean
 from facts import check_facts
 from verifier import verify_text
 
-st.set_page_config(page_title="Fake News & Poster Detector", page_icon="🕵️")
+st.set_page_config(page_title="Fake News & Image Detector", page_icon="🕵️")
 
 
 def secret(name, default=""):
@@ -187,7 +187,7 @@ def run_check(text, use_web, google_key, topic):
 # ------------------------------------------------------------------ UI
 login_gate()
 
-st.title("🕵️ Fake News & Fake Poster Detector")
+st.title("🕵️ Fake News & Image Detector")
 
 with st.sidebar:
     st.header("Settings")
